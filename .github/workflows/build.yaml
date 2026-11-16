@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -164,6 +165,8 @@ jobs:
           name: package-${{ matrix.platform }}
           path: ${{ steps.package.outputs.name }}
           if-no-files-found: error
+    outputs:
+      version: ${{ steps.package.outputs.version }}
 
   # The analyzer and the sample ring under AddressSanitizer and UndefinedBehaviorSanitizer.
   sanitize:
@@ -183,3 +186,52 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSSP_SANITIZE=ON
           cmake --build build --parallel --target analyzer-test
           ./build/analyzer-test
+
+  release:
+    needs: [build, sanitize]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check that the tag matches the version
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [ "${TAG}" != "v${VERSION}" ]; then
+            echo "Tag ${TAG} does not match version ${VERSION} in CMakeLists.txt"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: package-*
+          merge-multiple: true
+
+      - name: List release files
+        run: sha256sum simple-spectrum-*.zip > "${RUNNER_TEMP}/release-checksums.txt"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/release-checksums.txt
+
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        # gh release create cannot combine --notes-from-tag with --repo, and this job has no checkout,
+        # so the notes are read from the annotated tag through the API.
+        run: |
+          read -r type sha < <(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.type + " " + .object.sha')
+          if [ "${type}" != tag ]; then
+            echo "${TAG} is not an annotated tag; its annotation becomes the release notes"
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq '.message' > "${RUNNER_TEMP}/release-notes.md"
+          gh release create "${TAG}" simple-spectrum-*.zip --repo "${GITHUB_REPOSITORY}" --draft --verify-tag \
+            --title "${TAG}" --notes-file "${RUNNER_TEMP}/release-notes.md"
