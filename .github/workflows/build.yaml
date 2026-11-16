@@ -124,6 +124,7 @@ jobs:
       # Pictures for the write-up: the sweep drawn without a window, and the live window on the virtual display.
       - name: Pictures
         if: always() && steps.package.outcome == 'success'
+        timeout-minutes: 5
         env:
           PLATFORM: ${{ matrix.platform }}
         run: |
@@ -136,12 +137,14 @@ jobs:
             Xvfb :99 -screen 0 800x480x24 &
             xvfb_pid=$!
             sleep 2
-            DISPLAY=:99 "${demo}" window 6 &
+            DISPLAY=:99 timeout 30 "${demo}" window 6 &
+            demo_pid=$!
             sleep 4
             DISPLAY=:99 xwd -root -silent > pictures/xvfb-window.xwd
             convert pictures/xvfb-window.xwd pictures/xvfb-window.png
             rm pictures/xvfb-window.xwd
-            wait || true
+            # Wait only for the demo. A bare wait would also wait for Xvfb, which never exits by itself.
+            wait "${demo_pid}" || true
             kill "${xvfb_pid}" || true
           fi
           ls -R pictures
