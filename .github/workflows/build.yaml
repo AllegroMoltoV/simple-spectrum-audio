@@ -15,20 +15,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          # Runner images are pinned, so a new image does not change the build without a change here.
+          - os: windows-2022
             platform: windows-x64
             configure: -A x64
-            render_test: build/Release/render-test.exe
-            vst3_bundle: build/assets/VST3/Simple Spectrum.vst3
-            clap_file: build/assets/CLAP/Release/Simple Spectrum.clap
+            vst3_binary: x86_64-win/Simple Spectrum.vst3
             pluginval_exe: pluginval.exe
             validator_exe: clap-validator.exe
           - os: ubuntu-24.04
             platform: linux-x86_64
             configure: -DCMAKE_BUILD_TYPE=Release
-            render_test: build/render-test
-            vst3_bundle: build/assets/Simple Spectrum.vst3
-            clap_file: build/assets/Simple Spectrum.clap
+            vst3_binary: x86_64-linux/Simple Spectrum.so
             pluginval_exe: pluginval
             validator_exe: clap-validator
     runs-on: ${{ matrix.os }}
@@ -62,9 +59,7 @@ jobs:
 
       - name: Vulkan device
         if: runner.os == 'Linux'
-        run: |
-          echo "VK_DRIVER_FILES=${VK_DRIVER_FILES}"
-          vulkaninfo --summary
+        run: vulkaninfo --summary
 
       - name: Configure
         env:
@@ -74,32 +69,44 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      # Layer 1 (the numbers behind the picture) and layer 2 (the picture compared with the golden image).
+      - name: Unit and rendering tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        id: package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VST3_BINARY: ${{ matrix.vst3_binary }}
+        run: |
+          version=$(sed -nE 's/^project\(simple-spectrum-audio VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
+          cmake --install build --config Release --prefix dist
+          bash .github/scripts/check-package.sh dist "${VST3_BINARY}"
+          name="simple-spectrum-${version}-${PLATFORM}.zip"
+          (cd dist && cmake -E tar cf "../${name}" --format=zip -- *)
+          unzip -l "${name}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+
       - name: Shared libraries of the Linux plug-in
         if: runner.os == 'Linux'
         run: |
-          readelf -d "build/assets/Simple Spectrum.clap" | grep NEEDED
-          readelf -d "build/assets/Simple Spectrum.vst3/Contents/x86_64-linux/Simple Spectrum.so" | grep NEEDED
-
-      - name: Windowless rendering test
-        env:
-          RENDER_TEST: ${{ matrix.render_test }}
-          PLATFORM: ${{ matrix.platform }}
-        run: |
-          mkdir -p images
-          "${RENDER_TEST}" "images/${PLATFORM}-peak55.png" "images/${PLATFORM}-peak30.png"
+          readelf -d "dist/CLAP/Simple Spectrum.clap" | grep NEEDED
+          readelf -d "dist/VST3/Simple Spectrum.vst3/Contents/x86_64-linux/Simple Spectrum.so" | grep NEEDED
 
       - name: Download pluginval and clap-validator
         env:
           PLATFORM: ${{ matrix.platform }}
         run: bash .github/scripts/fetch-validators.sh "${RUNNER_TEMP}/validators" "${PLATFORM}"
 
+      # Layer 3: pluginval opens and closes the window, also while processing and while automating parameters.
       - name: Validate VST 3 with pluginval
         env:
           PLUGINVAL_EXE: ${{ matrix.pluginval_exe }}
-          VST3_BUNDLE: ${{ matrix.vst3_bundle }}
         run: |
           pluginval=$(find "${RUNNER_TEMP}/validators/pluginval" -name "${PLUGINVAL_EXE}" -type f | head -n 1)
-          set -- "${pluginval}" validate --strictness-level 10 --output-dir "${RUNNER_TEMP}/pluginval-logs" "${VST3_BUNDLE}"
+          set -- "${pluginval}" validate --strictness-level 10 --output-dir "${RUNNER_TEMP}/pluginval-logs" \
+            "dist/VST3/Simple Spectrum.vst3"
           if [ "${RUNNER_OS}" = "Linux" ]; then
             xvfb-run -a -s "-screen 0 1280x800x24" "$@"
           else
@@ -109,36 +116,67 @@ jobs:
       - name: Validate CLAP with clap-validator
         env:
           VALIDATOR_EXE: ${{ matrix.validator_exe }}
-          CLAP_FILE: ${{ matrix.clap_file }}
         run: |
           validator=$(find "${RUNNER_TEMP}/validators/clap-validator" -name "${VALIDATOR_EXE}" -type f | head -n 1)
           chmod +x "${validator}"
-          "${validator}" validate "${CLAP_FILE}"
+          "${validator}" validate "dist/CLAP/Simple Spectrum.clap"
 
-      # Pictures of the virtual display while pluginval opens the plug-in window, for the write-up.
-      - name: Capture the virtual display
-        if: runner.os == 'Linux'
-        continue-on-error: true
+      # Pictures for the write-up: the sweep drawn without a window, and the live window on the virtual display.
+      - name: Pictures
+        if: always() && steps.package.outcome == 'success'
         env:
-          VST3_BUNDLE: ${{ matrix.vst3_bundle }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          Xvfb :99 -screen 0 1280x800x24 &
-          xvfb_pid=$!
-          sleep 2
-          pluginval=$(find "${RUNNER_TEMP}/validators/pluginval" -name pluginval -type f | head -n 1)
-          DISPLAY=:99 "${pluginval}" validate --strictness-level 2 "${VST3_BUNDLE}" > /dev/null 2>&1 &
-          pluginval_pid=$!
-          for i in $(seq -w 1 40); do
-            DISPLAY=:99 xwd -root -silent > "frame-${i}.xwd" || true
-            sleep 0.25
-          done
-          wait "${pluginval_pid}" || true
-          kill "${xvfb_pid}" || true
-          for f in frame-*.xwd; do convert "${f}" "images/xvfb-${f%.xwd}.png"; done
+          mkdir -p pictures/frames
+          cp build/render-output/*.png pictures/ || true
+          demo=$(find build -name 'spectrum-demo*' -type f \( -name '*.exe' -o -perm -u+x \) | head -n 1)
+          "${demo}" frames pictures/frames
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            convert -delay 7 -loop 0 pictures/frames/frame-*.png pictures/sweep.gif
+            Xvfb :99 -screen 0 800x480x24 &
+            xvfb_pid=$!
+            sleep 2
+            DISPLAY=:99 "${demo}" window 6 &
+            sleep 4
+            DISPLAY=:99 xwd -root -silent > pictures/xvfb-window.xwd
+            convert pictures/xvfb-window.xwd pictures/xvfb-window.png
+            rm pictures/xvfb-window.xwd
+            wait || true
+            kill "${xvfb_pid}" || true
+          fi
+          ls -R pictures
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: images-${{ matrix.platform }}
-          path: images/
+          name: pictures-${{ matrix.platform }}
+          path: |
+            pictures/
+            build/render-output/
           if-no-files-found: warn
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.package.outcome == 'success'
+        with:
+          name: package-${{ matrix.platform }}
+          path: ${{ steps.package.outputs.name }}
+          if-no-files-found: error
+
+  # The analyzer and the sample ring under AddressSanitizer and UndefinedBehaviorSanitizer.
+  sanitize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxcomposite-dev libxcb1-dev libxcb-present-dev libfontconfig1-dev
+      - name: Build and test
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSSP_SANITIZE=ON
+          cmake --build build --parallel --target analyzer-test
+          ./build/analyzer-test
