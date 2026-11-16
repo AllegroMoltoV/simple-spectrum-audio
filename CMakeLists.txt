@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(simple-spectrum-audio VERSION 1.0.0 LANGUAGES C CXX)
+project(simple-spectrum-audio VERSION 1.0.1 LANGUAGES C CXX)
 
 # Visage requires C++20.
 set(CMAKE_CXX_STANDARD 20)
