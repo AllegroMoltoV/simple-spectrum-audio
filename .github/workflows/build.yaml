@@ -50,7 +50,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
             libxcomposite-dev libxcb1-dev libxcb-present-dev libfontconfig1-dev mesa-vulkan-drivers libvulkan1 \
             vulkan-tools xvfb xauth x11-apps imagemagick
-          echo "VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd.*.json | head -n 1)" >> "${GITHUB_ENV}"
+          # The file name of lavapipe's driver manifest differs between Mesa versions, so look it up in the package.
+          # An empty VK_DRIVER_FILES would hide every driver, so stop here if it is missing.
+          icd=$(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd[^/]*\.json$' | head -n 1)
+          if [ -z "${icd}" ]; then
+            dpkg -L mesa-vulkan-drivers | grep -E '\.json$'
+            echo "lavapipe driver manifest not found" >&2
+            exit 1
+          fi
+          echo "VK_DRIVER_FILES=${icd}" >> "${GITHUB_ENV}"
 
       - name: Vulkan device
         if: runner.os == 'Linux'
