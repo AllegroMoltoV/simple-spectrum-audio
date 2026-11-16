@@ -6,6 +6,8 @@ A spectrum analyzer for DAWs. It shows the level of the input at each frequency 
 
 音のプラグイン倉庫くんの[掲載ページ](https://audio-soko-kun.allegromoltov.jp/plugins/allegromoltov/simple-spectrum-audio)から、検査を通った版を入手できます。 / Listed on [Audio Plugin Soko-kun](https://audio-soko-kun.allegromoltov.jp/plugins/allegromoltov/simple-spectrum-audio?lang=en), which links only to releases that passed its checks.
 
+![DAW で再生中の音楽を表示している Simple Spectrum の窓 / The Simple Spectrum window showing music playing in a DAW](docs/images/demo.gif)
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/VST_Compatible_Logo_Steinberg_negative.png">
   <img src="docs/images/VST_Compatible_Logo_Steinberg.png" alt="VST Compatible" width="120">
@@ -122,6 +124,10 @@ VST is a registered trademark of Steinberg Media Technologies GmbH.
 The source code, workflow, documentation, and logo of this plugin were written with Anthropic Claude Code. The author decided the requirements, reviewed the logo, and approved each external operation.
 
 ## 更新履歴
+
+### 1.0.1
+
+- DAW で表示している様子の画像を、README と音のプラグイン倉庫くんの掲載ページに載せました。プラグインの動作は 1.0.0 と同じです。
 
 ### 1.0.0
 
