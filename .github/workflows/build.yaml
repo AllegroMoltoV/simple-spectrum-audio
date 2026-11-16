@@ -1,0 +1,136 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            configure: -A x64
+            render_test: build/Release/render-test.exe
+            vst3_bundle: build/assets/VST3/Simple Spectrum.vst3
+            clap_file: build/assets/CLAP/Release/Simple Spectrum.clap
+            pluginval_exe: pluginval.exe
+            validator_exe: clap-validator.exe
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            configure: -DCMAKE_BUILD_TYPE=Release
+            render_test: build/render-test
+            vst3_bundle: build/assets/Simple Spectrum.vst3
+            clap_file: build/assets/Simple Spectrum.clap
+            pluginval_exe: pluginval
+            validator_exe: clap-validator
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Visage draws with Vulkan on Linux. The runner has no GPU, so Mesa's lavapipe renders on the CPU.
+      # Xvfb provides the virtual display that pluginval opens the plug-in window on.
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxcomposite-dev libxcb1-dev libxcb-present-dev libfontconfig1-dev mesa-vulkan-drivers libvulkan1 \
+            vulkan-tools xvfb xauth x11-apps imagemagick
+          echo "VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd.*.json | head -n 1)" >> "${GITHUB_ENV}"
+
+      - name: Vulkan device
+        if: runner.os == 'Linux'
+        run: |
+          echo "VK_DRIVER_FILES=${VK_DRIVER_FILES}"
+          vulkaninfo --summary
+
+      - name: Configure
+        env:
+          CONFIGURE: ${{ matrix.configure }}
+        run: cmake -B build ${CONFIGURE}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Shared libraries of the Linux plug-in
+        if: runner.os == 'Linux'
+        run: |
+          readelf -d "build/assets/Simple Spectrum.clap" | grep NEEDED
+          readelf -d "build/assets/Simple Spectrum.vst3/Contents/x86_64-linux/Simple Spectrum.so" | grep NEEDED
+
+      - name: Windowless rendering test
+        env:
+          RENDER_TEST: ${{ matrix.render_test }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p images
+          "${RENDER_TEST}" "images/${PLATFORM}-peak55.png" "images/${PLATFORM}-peak30.png"
+
+      - name: Download pluginval and clap-validator
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: bash .github/scripts/fetch-validators.sh "${RUNNER_TEMP}/validators" "${PLATFORM}"
+
+      - name: Validate VST 3 with pluginval
+        env:
+          PLUGINVAL_EXE: ${{ matrix.pluginval_exe }}
+          VST3_BUNDLE: ${{ matrix.vst3_bundle }}
+        run: |
+          pluginval=$(find "${RUNNER_TEMP}/validators/pluginval" -name "${PLUGINVAL_EXE}" -type f | head -n 1)
+          set -- "${pluginval}" validate --strictness-level 10 --output-dir "${RUNNER_TEMP}/pluginval-logs" "${VST3_BUNDLE}"
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            xvfb-run -a -s "-screen 0 1280x800x24" "$@"
+          else
+            "$@"
+          fi
+
+      - name: Validate CLAP with clap-validator
+        env:
+          VALIDATOR_EXE: ${{ matrix.validator_exe }}
+          CLAP_FILE: ${{ matrix.clap_file }}
+        run: |
+          validator=$(find "${RUNNER_TEMP}/validators/clap-validator" -name "${VALIDATOR_EXE}" -type f | head -n 1)
+          chmod +x "${validator}"
+          "${validator}" validate "${CLAP_FILE}"
+
+      # Pictures of the virtual display while pluginval opens the plug-in window, for the write-up.
+      - name: Capture the virtual display
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        env:
+          VST3_BUNDLE: ${{ matrix.vst3_bundle }}
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 &
+          xvfb_pid=$!
+          sleep 2
+          pluginval=$(find "${RUNNER_TEMP}/validators/pluginval" -name pluginval -type f | head -n 1)
+          DISPLAY=:99 "${pluginval}" validate --strictness-level 2 "${VST3_BUNDLE}" > /dev/null 2>&1 &
+          pluginval_pid=$!
+          for i in $(seq -w 1 40); do
+            DISPLAY=:99 xwd -root -silent > "frame-${i}.xwd" || true
+            sleep 0.25
+          done
+          wait "${pluginval_pid}" || true
+          kill "${xvfb_pid}" || true
+          for f in frame-*.xwd; do convert "${f}" "images/xvfb-${f%.xwd}.png"; done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: images-${{ matrix.platform }}
+          path: images/
+          if-no-files-found: warn
