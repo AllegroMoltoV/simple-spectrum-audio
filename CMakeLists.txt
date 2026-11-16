@@ -40,6 +40,18 @@ set(VISAGE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 # X11 only: a plug-in window cannot be embedded in a host window on Wayland, and the plug-in would need
 # libwayland-client and libxkbcommon at run time.
 set(VISAGE_WAYLAND OFF CACHE BOOL "" FORCE)
+if(UNIX AND NOT APPLE)
+  # Visage uses the system's Vulkan headers when it finds them, and otherwise downloads them unpinned. Pin them here
+  # and hand them to Visage, so every build uses the same headers and the archive carries their license.
+  FetchContent_Declare(
+    vulkan_headers
+    URL https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.341.tar.gz
+    URL_HASH SHA256=8876aad926b2e72bdefddc34885472d5332e2d20aa3ed57313466f0bc982cf3f
+    SOURCE_SUBDIR cmake-not-used
+  )
+  FetchContent_MakeAvailable(vulkan_headers)
+  set(VISAGE_VULKAN_INCLUDE_DIR "${vulkan_headers_SOURCE_DIR}/include" CACHE PATH "" FORCE)
+endif()
 FetchContent_Declare(
   visage
   URL https://github.com/VitalAudio/visage/archive/5754ff8184cd0ba47a6f0a54a5f4a71974301036.tar.gz
